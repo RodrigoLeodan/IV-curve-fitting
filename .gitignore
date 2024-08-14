@@ -1,162 +1,455 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider, Button
+from scipy.optimize import least_squares, differential_evolution
+from sklearn.ensemble import RandomForestRegressor
+import tkinter as tk
+from tkinter import filedialog, simpledialog, messagebox
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import os
 
-# C extensions
-*.so
+# Definir el modelo mejorado de dos diodos con parámetros ajustables
+def modelo_dos_diodos_mejorado(V, I01, I02, Rs, Rp, T):
+    q = 1.60217662e-19
+    k = 1.38064852e-23
+    n1, n2 = 1, 2
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+    V = np.asarray(V)
+    func = lambda I_val, V_val: I01 * (np.exp(q * (V_val - I_val * Rs) / (n1 * k * T)) - 1) + \
+                                I02 * (np.exp(q * (V_val - I_val * Rs) / (n2 * k * T)) - 1) + \
+                                (V_val - I_val * Rs) / Rp - I_val
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+    I = np.array([least_squares(func, 0, args=(V_val,)).x for V_val in V])
+    return I
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+# Versión vectorizada del modelo
+def modelo_dos_diodos_vectorized(V, I01, I02, Rs, Rp, T):
+    q = 1.60217662e-19
+    k = 1.38064852e-23
+    n1, n2 = 1, 2
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
+    def equation(I, V):
+        term1 = I01 * (np.exp(q * (V - I * Rs) / (n1 * k * T)) - 1)
+        term2 = I02 * (np.exp(q * (V - I * Rs) / (n2 * k * T)) - 1)
+        term3 = (V - I * Rs) / Rp
+        return term1 + term2 + term3 - I
 
-# Translations
-*.mo
-*.pot
+    I_initial = np.zeros_like(V)
+    I_solution = least_squares(equation, I_initial, args=(V,))
+    return I_solution.x
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+# Función para el ajuste que incluye los parámetros
+def fit_func(params, V, I, T):
+    I01, I02, Rs, Rp = params
+    I_fit = modelo_dos_diodos_vectorized(V, I01, I02, Rs, Rp, T)
+    return np.sum((I_fit - I) ** 2)
+# Modelo de Machine Learning para la estimación inicial de parámetros
+class InitialEstimator:
+    def __init__(self):
+        self.model = RandomForestRegressor()
 
-# Flask stuff:
-instance/
-.webassets-cache
+    def fit(self, X, y):
+        self.model.fit(X, y)
 
-# Scrapy stuff:
-.scrapy
+    def predict(self, X):
+        return self.model.predict(X)
 
-# Sphinx documentation
-docs/_build/
+# Entrenar el modelo
+def train_ml_model():
+    X_train = np.random.rand(100, 3)
+    y_train = np.random.rand(100, 4)
+    estimator = InitialEstimator()
+    estimator.fit(X_train, y_train)
+    return estimator
 
-# PyBuilder
-.pybuilder/
-target/
+estimator = train_ml_model()
+# Inicializar variables
+I = V = T = selected = None
+I_fit_initial = V_fit_initial = None
+timer = None
+results = {}
+file_name = ""
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# Crear la figura y los ejes para la gráfica
+fig, ax = plt.subplots(figsize=(12, 8))
+plt.subplots_adjust(left=0.3, bottom=0.4, right=0.75)
 
-# IPython
-profile_default/
-ipython_config.py
+# Graficar los datos experimentales
+scatter = ax.scatter([], [], c='blue', label='Datos experimentales', picker=True)
 
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
+# Crear la curva inicial del modelo ajustado
+[line] = ax.plot([], [], 'r-', label='Ajuste del modelo')
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
+line_max, = ax.plot([], [], 'g--', label='Máximo ajuste')
+line_10, = ax.plot([], [], 'm--', label='Menor error')
 
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
+ax.set_xlabel('Voltaje (V)')
+ax.set_ylabel('Corriente (I)')
+ax.set_xlim(0, 0.9)
+ax.set_ylim(1e-7, 1e+02)
+ax.set_yscale('log')
+ax.legend(loc='upper right')
+ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+plt.title('Ajuste del modelo de dos diodos mejorado a los datos IV')
+# Crear sliders para los parámetros con intervalos iniciales
+I01_min, I01_max = 1e-14, 1e-9
+I02_min, I02_max = 1e-9, 1e-5
+Rs_min, Rs_max = 0.001, 0.70
+Rp_min, Rp_max = 418, 41800
 
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
-#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
-.pdm.toml
-.pdm-python
-.pdm-build/
+axcolor = 'lightgoldenrodyellow'
+ax_I01 = plt.axes([0.35, 0.25, 0.45, 0.03], facecolor=axcolor)
+ax_I02 = plt.axes([0.35, 0.20, 0.45, 0.03], facecolor=axcolor)
+ax_Rs = plt.axes([0.35, 0.15, 0.45, 0.03], facecolor=axcolor)
+ax_Rp = plt.axes([0.35, 0.10, 0.45, 0.03], facecolor=axcolor)
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
+s_I01 = Slider(ax_I01, 'I01', I01_min, I01_max, valinit=1e-12, valstep=(I01_max - I01_min) / 1000)
+s_I02 = Slider(ax_I02, 'I02', I02_min, I02_max, valinit=1e-7, valstep=(I02_max - I02_min) / 1000)
+s_Rs = Slider(ax_Rs, 'Rs', Rs_min, Rs_max, valinit=0.01, valstep=(Rs_max - Rs_min) / 1000)
+s_Rp = Slider(ax_Rp, 'Rp', Rp_min, Rp_max, valinit=1000, valstep=(Rp_max - Rp_min) / 1000)
 
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
+# Función para cambiar los límites de los sliders
+def change_slider_range(slider, label):
+    def on_double_click(event):
+        if event.dblclick:
+            new_min = float(simpledialog.askstring("Input", f"Nuevo mínimo para {label}", initialvalue=str(slider.valmin)))
+            new_max = float(simpledialog.askstring("Input", f"Nuevo máximo para {label}", initialvalue=str(slider.valmax)))
+            slider.valmin = new_min
+            slider.valmax = new_max
+            slider.ax.set_xlim(new_min, new_max)
+            slider.valstep = (new_max - new_min) / 1000
+            slider.set_val(slider.val)  # Refresh slider
+            fig.canvas.draw_idle()
+    return on_double_click
+# Función para conectar los sliders a los eventos de cambio de rango
+def connect_sliders_to_events():
+    s_I01.ax.figure.canvas.mpl_connect('button_press_event', change_slider_range(s_I01, 'I01'))
+    s_I02.ax.figure.canvas.mpl_connect('button_press_event', change_slider_range(s_I02, 'I02'))
+    s_Rs.ax.figure.canvas.mpl_connect('button_press_event', change_slider_range(s_Rs, 'Rs'))
+    s_Rp.ax.figure.canvas.mpl_connect('button_press_event', change_slider_range(s_Rp, 'Rp'))
 
-# SageMath parsed files
-*.sage.py
+# Botón para activar los cambios de límites
+limits_button_ax = plt.axes([0.4, 0.01, 0.2, 0.05])
+limits_button = Button(limits_button_ax, 'Limites')
+limits_button.on_clicked(lambda event: connect_sliders_to_events())
+def toggle_param(button, label):
+    def toggle(event):
+        state = label.get_text()
+        if state == 'fijo':
+            label.set_text('ajuste')
+            button.color = 'lightgreen'
+        else:
+            label.set_text('fijo')
+            button.color = 'lightcoral'
+        button.hovercolor = button.color
+        fig.canvas.draw_idle()
+    return toggle
 
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+labels = []
+buttons = []
+for i, param in enumerate(['I01', 'I02', 'Rs', 'Rp']):
+    label = plt.text(0.28, 0.265 - i * 0.05, 'fijo', fontsize=10, transform=fig.transFigure, va='center')
+    ax_button_param = plt.axes([0.1, 0.235 - i * 0.05, 0.15, 0.04])
+    button_param = Button(ax_button_param, param, color='lightcoral', hovercolor='lightcoral')
+    button_param.on_clicked(toggle_param(button_param, label))
+    labels.append(label)
+    buttons.append(button_param)
 
-# Spyder project settings
-.spyderproject
-.spyproject
+# Texto para mostrar los errores
+error_text_10 = ax.text(-0.4, 0.5, '', transform=ax.transAxes, fontsize=12,
+                        verticalalignment='bottom', horizontalalignment='left', bbox=dict(facecolor='white', alpha=0.8))
 
-# Rope project settings
-.ropeproject
+error_text_10.set_position((-0.6, 0.5))
 
-# mkdocs documentation
-/site
+error_text = ax.text(1.05, 0.7, '', transform=ax.transAxes, fontsize=12,
+                     verticalalignment='bottom', horizontalalignment='left', bbox=dict(facecolor='white', alpha=0.8))
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+error_text_max = ax.text(1.05, 0.5, '', transform=ax.transAxes, fontsize=12,
+                         verticalalignment='bottom', horizontalalignment='left', bbox=dict(facecolor='white', alpha=0.8))
 
-# Pyre type checker
-.pyre/
+status_text = ax.text(0.5, 1.05, '', transform=ax.transAxes, fontsize=12,
+                      verticalalignment='bottom', horizontalalignment='center', bbox=dict(facecolor='white', alpha=0.8))
 
-# pytype static type analyzer
-.pytype/
+def calculate_errors(I01, I02, Rs, Rp, V, I):
+    I_fit_manual = modelo_dos_diodos_vectorized(V, I01, I02, Rs, Rp, T)
+    error_relative = np.mean(np.abs((I_fit_manual - I) / I)) * 100
+    return error_relative
+def update(val):
+    if V is None or I is None:
+        return
+    I01 = s_I01.val
+    I02 = s_I02.val
+    Rs = s_Rs.val
+    Rp = s_Rp.val
+    I_fit, V_fit = modelo_dos_diodos_vectorized(V[selected], I01, I02, Rs, Rp, T), V[selected]
+    if len(V_fit) == len(I_fit):
+        line.set_data(V_fit, I_fit)
+        fig.canvas.draw_idle()
+        error_relative = calculate_errors(I01, I02, Rs, Rp, V[selected], I[selected])
+        error_text_10.set_text(f"Valores ajustados manualmente:\n"
+                               f"I01 = {I01:.2e}\n"
+                               f"I02 = {I02:.2e}\n"
+                               f"Rs = {Rs:.2e}\n"
+                               f"Rp = {Rp:.2e}\n"
+                               f"Error relativo: {error_relative:.2f}%")
 
-# Cython debug symbols
-cython_debug/
+s_I01.on_changed(update)
+s_I02.on_changed(update)
+s_Rs.on_changed(update)
+s_Rp.on_changed(update)
+def onpick(event):
+    global timer
+    ind = event.ind[0]
+    selected[ind] = not selected[ind]
+    scatter.set_facecolors(['blue' if sel else 'gray' for sel in selected])
+    fig.canvas.draw_idle()
+    if timer is not None:
+        timer.cancel()
+    timer = threading.Timer(3.0, update_fit)
+    timer.start()
 
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
+def recalculate_fit():
+    global I01_fit_auto, I02_fit_auto, Rs_fit_auto, Rp_fit_auto, bounds
+    selected_V = V[selected]
+    selected_I = I[selected]
+    if len(selected_V) > 0:
+        initial_params = estimator.predict([[selected_V[0], selected_I[0], T]])[0]
+        result = differential_evolution(fit_func, bounds, args=(selected_V, selected_I, T), maxiter=500, popsize=15)
+        I01_fit_auto, I02_fit_auto, Rs_fit_auto, Rp_fit_auto = result.x
+        return modelo_dos_diodos_vectorized(selected_V, I01_fit_auto, I02_fit_auto, Rs_fit_auto, Rp_fit_auto, T), selected_V
+    else:
+        return np.array([]), np.array([])
+
+def update_fit():
+    I_fit_updated, V_fit_updated = recalculate_fit()
+    if len(V_fit_updated) == len(I_fit_updated):
+        line.set_data(V_fit_updated, I_fit_updated)
+        fig.canvas.draw_idle()
+def save_current_results():
+    if V is None or I is None:
+        messagebox.showwarning("Advertencia", "No hay datos cargados para guardar.")
+        return
+
+    I01 = s_I01.val
+    I02 = s_I02.val
+    Rs = s_Rs.val
+    Rp = s_Rp.val
+    error_relative = calculate_errors(I01, I02, Rs, Rp, V[selected], I[selected])
+
+    # Guardar los valores actuales en el diccionario results
+    results[file_name] = {
+        "I01": I01,
+        "I02": I02,
+        "Rs": Rs,
+        "Rp": Rp,
+        "Error relativo": error_relative
+    }
+    
+    # Notificación de guardado y cambio de color del botón
+    messagebox.showinfo("Guardado", "Valores ajustados manualmente guardados correctamente.")
+    save_button_ax.set_facecolor('lightgreen')
+
+def extract_all_results():
+    save_path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")], title="Extraer Todos los Resultados")
+    if save_path:
+        with open(save_path, "w") as f:
+            for fname, result in results.items():
+                f.write(f"Archivo: {fname}\n")
+                for key, value in result.items():
+                    f.write(f"{key}: {value}\n")
+                f.write("\n")
+        messagebox.showinfo("Extraído", f"Todos los resultados extraídos en {save_path}")
+def max_adjust(event):
+    if V is None or I is None:
+        return
+    status_text.set_text("Realizando máximo ajuste...")
+    fig.canvas.draw_idle()
+
+    I01, I02, Rs, Rp = s_I01.val, s_I02.val, s_Rs.val, s_Rp.val
+    selected_V = V[selected]
+    selected_I = I[selected]
+
+    initial_params = [I01, I02, Rs, Rp]
+    bounds_max = [
+        (max(I01 * 0.9, 1e-16), min(I01 * 1.1, 1e-10)),
+        (max(I02 * 0.9, 1e-8), min(I02 * 1.1, 1e-6)),
+        (max(Rs * 0.9, 1e-9), min(Rs * 1.1, 1.7e-1)),
+        (max(Rp * 0.9, 418), min(Rp * 1.1, 41800))
+    ]
+
+    def selective_fit_func(params, V, I, T):
+        full_params = [
+            params[0] if labels[0].get_text() == 'ajuste' else I01,
+            params[1] if labels[1].get_text() == 'ajuste' else I02,
+            params[2] if labels[2].get_text() == 'ajuste' else Rs,
+            params[3] if labels[3].get_text() == 'ajuste' else Rp,
+        ]
+        return fit_func(full_params, V, I, T)
+
+    result = least_squares(selective_fit_func, initial_params, bounds=(list(zip(*bounds_max))[0], list(zip(*bounds_max))[1]), args=(selected_V, selected_I, T))
+    I01_fit, I02_fit, Rs_fit, Rp_fit = result.x
+
+    I_fit_max, V_fit_max = modelo_dos_diodos_vectorized(V[selected], I01_fit, I02_fit, Rs_fit, Rp_fit, T), V[selected]
+
+    if len(V_fit_max) == len(I_fit_max):
+        line_max.set_data(V_fit_max, I_fit_max)
+        fig.canvas.draw_idle()
+
+        error_relative_max = calculate_errors(I01_fit, I02_fit, Rs_fit, Rp_fit, V[selected], I[selected])
+
+        print(f"Máximo ajuste:\nI01 = {I01_fit:.2e}\nI02 = {I02_fit:.2e}\nRs = {Rs_fit:.2e}\nRp = {Rp_fit:.2e}\nError relativo: {error_relative_max:.2f}%")
+        error_text_max.set_text(f"Máximo ajuste:\n"
+                                f"I01 = {I01_fit:.2e}\n"
+                                f"I02 = {I02:.2e}\n"
+                                f"Rs = {Rs_fit:.2e}\n"
+                                f"Rp = {Rp_fit:.2e}\n"
+                                f"Error relativo: {error_relative_max:.2f}%")
+    status_text.set_text("")
+    fig.canvas.draw_idle()
+def adjust_error(event):
+    if V is None or I is None:
+        return
+    status_text.set_text("Realizando ajuste de menor error...")
+    fig.canvas.draw_idle()
+
+    I01, I02, Rs, Rp = s_I01.val, s_I02.val, s_Rs.val, s_Rp.val
+    selected_V = V[selected]
+    selected_I = I[selected]
+
+    initial_params = [I01, I02, Rs, Rp]
+
+    bounds_max = [
+        (max(I01 * 0.8, 1e-16), min(I01 * 1.2, 1e-10)),
+        (max(I02 * 0.8, 1e-8), min(I02 * 1.2, 1e-6)),
+        (max(Rs * 0.8, 1e-9), min(Rs * 1.2, 1.7e-1)),
+        (max(Rp * 0.8, 418), min(Rp * 1.2, 41800))
+    ]
+
+    result_global = differential_evolution(fit_func, bounds_max, args=(selected_V, selected_I, T), maxiter=1000, popsize=15)
+    I01_fit, I02_fit, Rs_fit, Rp_fit = result_global.x
+
+    result_local = least_squares(fit_func, result_global.x, bounds=(list(zip(*bounds_max))[0], list(zip(*bounds_max))[1]), args=(selected_V, selected_I, T))
+    I01_fit, I02_fit, Rs_fit, Rp_fit = result_local.x
+
+    I_fit_error, V_fit_error = modelo_dos_diodos_vectorized(V[selected], I01_fit, I02_fit, Rs_fit, Rp_fit, T), V[selected]
+
+    error_relative_manual = calculate_errors(I01, I02, Rs, Rp, V[selected], I[selected])
+    error_relative_10 = calculate_errors(I01_fit, I02_fit, Rs_fit, Rp_fit, V[selected], I[selected])
+
+    if error_relative_10 < error_relative_manual:
+        if len(V_fit_error) == len(I_fit_error):
+            line_10.set_data(V_fit_error, I_fit_error)
+            fig.canvas.draw_idle()
+
+            results[file_name] = {
+                "I01": I01_fit,
+                "I02": I02_fit,
+                "Rs": Rs_fit,
+                "Rp": Rp_fit,
+                "Error relativo": error_relative_10
+            }
+
+            print(f"Menor error:\nI01 = {I01_fit:.2e}\nI02 = {I02_fit:.2e}\nRs = {Rs_fit:.2e}\nRp = {Rp_fit:.2e}\nError relativo: {error_relative_10:.2f}%")
+            error_text_10.set_text(f"Menor error:\n"
+                                   f"I01 = {I01_fit:.2e}\n"
+                                   f"I02 = {I02_fit:.2e}\n"
+                                   f"Rs = {Rs_fit:.2e}\n"
+                                   f"Rp = {Rp_fit:.2e}\n"
+                                   f"Error relativo: {error_relative_10:.2f}%")
+    else:
+        I_fit_intermedio = (I_fit_initial[selected] + I[selected]) / 2
+        result_intermedio = least_squares(fit_func, initial_params, bounds=(list(zip(*bounds_max))[0], list(zip(*bounds_max))[1]), args=(selected_V, I_fit_intermedio, T))
+        I01_fit_intermedio, I02_fit_intermedio, Rs_fit_intermedio, Rp_fit_intermedio = result_intermedio.x
+
+        I_fit_intermedio, V_fit_intermedio = modelo_dos_diodos_vectorized(V[selected], I01_fit_intermedio, I02_fit_intermedio, Rs_fit_intermedio, Rp_fit_intermedio, T), V[selected]
+
+        error_relative_intermediate = calculate_errors(I01_fit_intermedio, I02_fit_intermedio, Rs_fit_intermedio, Rp_fit_intermedio, V[selected], I[selected])
+
+        if len(V_fit_intermedio) == len(I_fit_intermedio):
+            line_10.set_data(V_fit_intermedio, I_fit_intermedio)
+            fig.canvas.draw_idle()
+
+            results[file_name] = {
+                "I01": I01_fit_intermedio,
+                "I02": I02_fit_intermedio,
+                "Rs": Rs_fit_intermedio,
+                "Rp": Rp_fit_intermedio,
+                "Error relativo": error_relative_intermediate
+            }
+
+            print(f"Curva intermedia:\nI01 = {I01_fit_intermedio:.2e}\nI02 = {I02_fit_intermedio:.2e}\nRs = {Rs_fit_intermedio:.2e}\nRp = {Rp_fit_intermedio:.2e}\nError relativo: {error_relative_intermediate:.2f}%")
+            error_text_10.set_text(f"Curva intermedia:\n"
+                                   f"I01 = {I01_fit_intermedio:.2e}\n"
+                                   f"I02 = {I02_fit_intermedio:.2e}\n"
+                                   f"Rs = {Rs_fit_intermedio:.2e}\n"
+                                   f"Rp = {Rp_fit_intermedio:.2e}\n"
+                                   f"Error relativo: {error_relative_intermediate:.2f}%")
+    status_text.set_text("")
+    fig.canvas.draw_idle()
+button_max_adjust = Button(plt.axes([0.8, 0.35, 0.15, 0.05]), 'Máximo ajuste')
+button_max_adjust.on_clicked(max_adjust)
+
+button_adjust_error = Button(plt.axes([0.1, 0.35, 0.15, 0.05]), 'Menor error')
+button_adjust_error.on_clicked(adjust_error)
+
+fig.canvas.mpl_connect('pick_event', onpick)
+
+def load_and_process_data(file_path):
+    global I, V, T, selected, I_fit_initial, V_fit_initial, bounds, file_name
+
+    data = np.loadtxt(file_path)
+    I = data[:, 0]
+    V = data[:, 1]
+    T = data[0, 2]
+
+    selected = np.ones_like(V, dtype=bool)
+    bounds = [(1e-16, 1e-10), (1e-8, 1e-6), (1e-9, 1.7e-1), (418, 41800)]
+
+    I_fit_initial, V_fit_initial = recalculate_fit()
+
+    scatter.set_offsets(np.c_[V, I])
+    line.set_data(V_fit_initial, I_fit_initial)
+
+    s_I01.set_val(I01_fit_auto)
+    s_I02.set_val(I02_fit_auto)
+    s_Rs.set_val(Rs_fit_auto)
+    s_Rp.set_val(Rp_fit_auto)
+
+    file_name = os.path.basename(file_path)
+
+    fig.canvas.draw_idle()
+
+def cargar_datos():
+    file_path = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
+    if not file_path:
+        return
+
+    file_name = file_path.split("/")[-1]
+    file_name_text.set_text(f"Archivo: {file_name}")
+    fig.canvas.draw_idle()
+
+    with ThreadPoolExecutor() as executor:
+        executor.submit(load_and_process_data, file_path)
+
+root = tk.Tk()
+root.withdraw()
+
+menu_button_ax = plt.axes([0.01, 0.95, 0.1, 0.04])
+menu_button = Button(menu_button_ax, 'Cargar datos')
+menu_button.on_clicked(lambda event: cargar_datos())
+
+save_button_ax = plt.axes([0.83, 0.95, 0.08, 0.04])
+save_button = Button(save_button_ax, 'Guardar')
+save_button.on_clicked(lambda event: save_current_results())
+
+extract_button_ax = plt.axes([0.92, 0.95, 0.08, 0.04])
+extract_button = Button(extract_button_ax, 'Extraer')
+extract_button.on_clicked(lambda event: extract_all_results())
+
+file_name_text = plt.text(0.14, 0.96, "Archivo: Ninguno", transform=fig.transFigure, fontsize=12,
+                          verticalalignment='center', horizontalalignment='left')
+
+# Mostrar la interfaz gráfica
+plt.show()
+
